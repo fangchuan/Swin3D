@@ -127,6 +127,7 @@ class Swin3DUNet(nn.Module):
         #       Batch, XYZ, RGB:        Nx7
         #       Batch, XYZ, RGB, NORM:  Nx10
         # coords_sp.C: input coordinates: Nx4
+        print(f'sp.shape: {sp.shape} coords_sp.shape: {coords_sp.shape}')
         sp_stack = []
         coords_sp_stack = []
         sp = self.stem_layer(sp)
@@ -174,8 +175,9 @@ class Swin3DUNet(nn.Module):
         if os.path.isfile(ckpt):
             checkpoint = torch.load(ckpt)
             weights = checkpoint['state_dict']
-            matched_weights = load_state_with_same_shape(self, weights, skip_first_conv=skip_first_conv, verbose=verbose)
-            self.load_state_dict(matched_weights, strict=False)
+            # matched_weights = load_state_with_same_shape(self, weights, skip_first_conv=skip_first_conv, verbose=verbose)
+            # self.load_state_dict(matched_weights, strict=False)
+            self.load_state_dict(weights, strict=True)
             if verbose:
                 print("=> loaded weight '{}'".format(ckpt))
         else:
