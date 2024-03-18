@@ -15,13 +15,40 @@ from MinkowskiEngine import SparseTensor
 import time
 
 import open3d
-
+from matplotlib import pyplot as plt
 from utils.data_util import data_prepare_scannet
+from utils.voxelize import voxelize
 
 # Structured3D semantic segmentation label set
 S25_LABEL_SET = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 14, 15,\
     16, 17, 18, 19, 22, 24, 25, 32, 34, 35, 38, 39, 40]
-
+CLASS_TO_LABEL = {
+    0: "wall",
+    1: "floor",
+    2: "cabinet",
+    3: "bed",
+    4: "chair",
+    5: "sofa",
+    6: "table",
+    7: "door",
+    8: "window",
+    9: "picture",
+    10: "desk",
+    11: "shelves",
+    12: "curtain",
+    13: "dresser",
+    14: "pillow",
+    15: "mirror",
+    16: "ceiling",
+    17: "fridge",
+    18: "television",
+    19: "night stand",
+    20: "sink",
+    21: "lamp",
+    22: "structure",
+    23: "furniture",
+    24: "prop",
+}
 # color palette
 COLOR_TO_ADEK_LABEL = {
     0: (120, 120, 120), #  1: "wall",
@@ -106,11 +133,12 @@ optimizer = torch.optim.AdamW(param_dicts, lr=args.base_lr, weight_decay=args.we
 
 # data = np.load("examples/input.npz")
 data_xyz, data_feat, data_labels = torch.load("/data/dataset/Structured3D/swin3d/swin3d/train/scene_00000_485142_1cm_seg.pth")
+voxel_size = 0.02
 xyz, feat, target = data_prepare_scannet(coord=data_xyz, 
                                          feat=data_feat, 
                                          label=data_labels, 
                                          split="test", 
-                                         voxel_size=0.02, 
+                                         voxel_size=voxel_size, 
                                          voxel_max=None, 
                                          transform=None, 
                                          shuffle_index=False)
@@ -133,7 +161,7 @@ begin_tms = time.time()
 feat, xyz, batch, target = feat.cuda(), xyz.cuda(), batch.cuda(), target.cuda()
 coords = torch.cat([batch.unsqueeze(-1), xyz], dim=-1)
 feat = torch.cat([feat, xyz], dim=1)
-print(f'feat: {feat.float().shape} coords: {torch.floor(coords).int().shape}')
+# print(f'feat: {feat.float().shape} coords: {torch.floor(coords).int().shape}')
 sp = SparseTensor(features=feat.float(), coordinates=torch.floor(coords).int(), device=feat.device)
 print(f'sp.C: {sp.C.shape}, sp.F: {sp.F.shape}')
 colors = feat[:, 0:3]
@@ -153,10 +181,56 @@ end_tms = time.time()
 print(f'Elapsed time: {end_tms - begin_tms} seconds')
 output_point_labels = output.argmax(dim=1).cpu().numpy()
 output_pcl = open3d.geometry.PointCloud()
-output_pcl.points = open3d.utility.Vector3dVector(xyz.cpu().numpy())
+output_pcl.points = open3d.utility.Vector3dVector(xyz.cpu().numpy()*voxel_size)
 point_colors = COLOR_LABELS[output_point_labels]
 output_pcl.colors = open3d.utility.Vector3dVector(point_colors/255.0)
 open3d.io.write_point_cloud("output_pcl.ply", output_pcl)
+
+# get bbox of the segmented point cloud
+predict_labels = np.unique(output_point_labels)
+print(f'predict_labels: {predict_labels}')
+for label in predict_labels:
+    if label == 0:
+        print("skip wall")
+        continue
+    if label == 1:
+        print("skip floor")
+        continue
+    if label == 16:
+        print("skip ceiling")
+        continue
+    mask = output_point_labels == label
+    object_points = xyz.cpu().numpy()[mask]
+    object_pcl = output_pcl.select_by_index(np.where(mask)[0])
+    open3d.io.write_point_cloud(f"object_{CLASS_TO_LABEL[label]}.ply", object_pcl)
+    # calculate the bounding box by caving voxel grid
+    
+    instace_labels = np.array(object_pcl.cluster_dbscan(eps=0.1, min_points=50, print_progress=True))
+    # print(f'instace_labels: {instace_labels.shape}')
+    max_label = instace_labels.max()
+    print(f"{CLASS_TO_LABEL[label]}  has {max_label + 1} clusters")
+    colors = plt.get_cmap("tab20")(instace_labels / (max_label if max_label > 0 else 1))
+    for instace_label in range(max_label + 1):
+        instance_mask = instace_labels == instace_label
+        # print(f'instance_mask: {instance_mask.shape}')
+        instance_pcl = object_pcl.select_by_index(np.where(instance_mask)[0])
+        open3d.io.write_point_cloud(f"object_{CLASS_TO_LABEL[label]}_{instace_label}.ply", instance_pcl)
+        # points = np.array(instance_pcl.points)
+        # bbox = np.array([np.min(points, axis=0), np.max(points, axis=0)])
+        # print(f'bbox: {bbox}')
+        # bbox_pcl = open3d.geometry.AxisAlignedBoundingBox(min_bound=bbox[0], max_bound=bbox[1])
+        bbox = instance_pcl.get_axis_aligned_bounding_box()
+        import trimesh
+        box_size = bbox.get_max_bound() - bbox.get_min_bound()
+        transform_matrix = np.eye(4)
+        transform_matrix[0:3, 3] = bbox.get_center()
+        box_trimesh_fmt = trimesh.creation.box(box_size, transform_matrix)
+        box_trimesh_fmt.export(f"object_{CLASS_TO_LABEL[label]}_{instace_label}_bbox.ply")
+        # bbox to mesh
+        # bbox_mesh = open3d.geometry.TriangleMesh.create_from_oriented_bounding_box(bbox).compute_vertex_normals()
+        # open3d.io.write_triangle_mesh(f"object_{CLASS_TO_LABEL[label]}_{instace_label}_bbox.ply", bbox_mesh)
+        # open3d.visualization.draw_geometries([input_pcl, output_pcl, bbox_pcl])
+
 optimizer.zero_grad()
 
 if use_amp:

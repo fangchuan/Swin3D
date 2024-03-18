@@ -9,6 +9,8 @@ from Swin3D.modules.mink_layers import MinkConvBNRelu, MinkResBlock
 from Swin3D.modules.swin3d_layers import GridDownsample, GridKNNDownsample, BasicLayer, Upsample
 from timm.models.layers import trunc_normal_
 
+from icecream import ic
+
 def load_state_with_same_shape(model, weights, skip_first_conv=False, verbose=True):
     if list(weights.keys())[0].startswith('module.'):
         if verbose:
@@ -16,9 +18,10 @@ def load_state_with_same_shape(model, weights, skip_first_conv=False, verbose=Tr
         weights = {k.partition('module.')[2]:weights[k] for k in weights.keys()}
     model_state = model.state_dict()
     
-    droped_weights = [k for k in weights.keys() if ('upsamples' in k or 'classifier' in k)]
-    weights = {k: v for k, v in weights.items() if 'upsamples' not in k}
-    weights = {k: v for k, v in weights.items() if 'classifier' not in k}
+    # droped_weights = [k for k in weights.keys() if ('upsamples' in k or 'classifier' in k)]
+    # weights = {k: v for k, v in weights.items() if 'upsamples' not in k}
+    # weights = {k: v for k, v in weights.items() if 'classifier' not in k}
+    droped_weights = []
     if skip_first_conv:
         droped_weights += [k for k in weights.keys() if 'stem_layer' in k]
         weights = {k: v for k, v in weights.items() if 'stem_layer' not in k}
@@ -113,7 +116,7 @@ class Swin3DUNet(nn.Module):
         self.num_classes = num_classes
         self.init_weights()
 
-    def forward(self, sp, coords_sp):
+    def forward(self, input_dict: dict):
         # sp: MinkowskiEngine SparseTensor for feature input
         # sp.F: input features,         NxC
         # sp.C: input coordinates,      Nx4
@@ -127,7 +130,8 @@ class Swin3DUNet(nn.Module):
         #       Batch, XYZ, RGB:        Nx7
         #       Batch, XYZ, RGB, NORM:  Nx10
         # coords_sp.C: input coordinates: Nx4
-        print(f'sp.shape: {sp.shape} coords_sp.shape: {coords_sp.shape}')
+        sp, coords_sp = input_dict['sp'], input_dict['coords_sp']
+        ic(sp.shape, coords_sp.shape)
         sp_stack = []
         coords_sp_stack = []
         sp = self.stem_layer(sp)
@@ -140,19 +144,24 @@ class Swin3DUNet(nn.Module):
             coords_sp_stack.append(coords_sp)
             sp, sp_down, coords_sp = layer(sp, coords_sp)
             sp_stack.append(sp)
+            ic(coords_sp.shape, sp.shape, sp_down.shape)
             assert (coords_sp.C == sp_down.C).all()
             sp = sp_down
 
         sp = sp_stack.pop()
         coords_sp = coords_sp_stack.pop()
+        input_dict['middle_feature_list'] = []
         for i, upsample in enumerate(self.upsamples):
             sp_i = sp_stack.pop()
             coords_sp_i = coords_sp_stack.pop()
             sp = upsample(sp, coords_sp, sp_i, coords_sp_i)
             coords_sp = coords_sp_i
+            ic(sp.shape)
+            input_dict['middle_feature_list'].append(sp)
 
         output = self.classifier(sp.F)
-        return output
+        input_dict['output_point_labels'] = output
+        return input_dict
     
 
     def init_weights(self):
@@ -175,9 +184,9 @@ class Swin3DUNet(nn.Module):
         if os.path.isfile(ckpt):
             checkpoint = torch.load(ckpt)
             weights = checkpoint['state_dict']
-            # matched_weights = load_state_with_same_shape(self, weights, skip_first_conv=skip_first_conv, verbose=verbose)
-            # self.load_state_dict(matched_weights, strict=False)
-            self.load_state_dict(weights, strict=True)
+            matched_weights = load_state_with_same_shape(self, weights, skip_first_conv=skip_first_conv, verbose=verbose)
+            self.load_state_dict(matched_weights, strict=False)
+            # self.load_state_dict(weights, strict=True)
             if verbose:
                 print("=> loaded weight '{}'".format(ckpt))
         else:
